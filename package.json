@@ -1,0 +1,9 @@
+{
+  "name": "mongodb_handler",
+  "main": "mdb_handler.js",
+  "dependencies": {
+    "async": "^1.4.0",
+    "jsonschema": "^1.0.2",
+    "mongodb": "^2.0.36"
+  }
+}
