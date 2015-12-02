@@ -12,11 +12,11 @@ var MongoClient = require('mongodb').MongoClient,
     Binary = require('mongodb').Binary,
     GridStore = require('mongodb').GridStore,
     Grid = require('mongodb').Grid,
-    Code = require('mongodb').Code,
-    BSON = require('mongodb').pure().BSON;
+    Code = require('mongodb').Code;
 
 var Validator = require('jsonschema').Validator;
 var Async = require('async');
+var Fs = require('fs');
 
 /* A JSON schema for the database configuration file */
 var configSchema = {
@@ -60,11 +60,10 @@ function checkValidity(param, schema) {
 }
 
 function openConfig() {
-   var fs = require('fs');
    var data;
 
    try {
-      data = fs.readFileSync('config.json', 'utf8');
+      data = Fs.readFileSync('config.json', 'utf8');
    } catch(err) {
       console.log(err);
       return false;
@@ -128,7 +127,9 @@ function detectRegex(object) {
 }
 
 function accessDatabase(callback) {
-   if(dataBase)
+   dataBase = dataBase || null;
+
+   if (dataBase)
       return callback(null, dataBase);
 
    MongoClient.connect(mongoUrl, callback);
@@ -296,6 +297,23 @@ function globalQueryOperation(objects, count, options, output) {
 /* MongoDB handler exports */
 
 /**
+ * @function closeDatabase
+ *
+ * The library keeps the database open
+ * to make operations faster. Use this
+ * function to manually shut down the
+ * database when needed.
+ */
+exports.closeDatabase = function () {
+   dataBase = dataBase || null;
+
+   if (dataBase) {
+      dataBase.close();
+   }
+
+};
+
+/**
  * @function checkConfig
  * 
  * Function reads and saves the server configuration.
@@ -398,7 +416,7 @@ exports.query = dbOperation.bind(null, queryOperation);
 exports.insertFile = function(path, idSeed, callback) {
 	var id, gridStore, fileSize;
 
-	fs.open(path, 'r', function (err, data) {
+	Fs.open(path, 'r', function (err, data) {
 		if (err) {
          errorMessage("fs error", err);
          return callback(err);
@@ -414,7 +432,7 @@ exports.insertFile = function(path, idSeed, callback) {
          }
 
          /* fetch the resource stats for testing */
-         fs.stat(path, function (err, stats) {
+         Fs.stat(path, function (err, stats) {
             if (err) {
                errorMessage("fs stat", err);
                return callback(err);
@@ -453,7 +471,7 @@ exports.insertFile = function(path, idSeed, callback) {
 								return callback("size mismatch");
 							}
 							
-                     console.log("Inserted " + path + " to database (" + id.toHextString() + ")");
+                     console.log("Inserted " + path + " to database (" + id + ")");
 							callback(null, doc);
 						});   
                });
@@ -504,7 +522,7 @@ exports.readFile = function (idSeed, callback) {
                   return callback(err);
                }
 
-               console.log("Read from database (" + id.toHextString() + ")");
+               console.log("Read from database (" + id + ")");
                callback(null, data);
             });   
          });
@@ -520,15 +538,10 @@ exports.readFile = function (idSeed, callback) {
  *
  * @param idSeed {String|Number} seed for the database id
  * @param callback {Function} callback function
+ * @todo doesn't work
 */
 exports.fileExists = function (idSeed, callback) {
-   var id;
-
-   if (typeof idSeed === 'string') {
-      id = idSeed;
-   } else {
-      id = ObjectID(idSeed);
-   }
+   var id = ObjectID(idSeed);
 
    accessDatabase(function (err, db) {
       if(err) {
@@ -539,7 +552,42 @@ exports.fileExists = function (idSeed, callback) {
          return callback(err);
       }
 
-      GridStore.exists(db, id, callback);   
+      GridStore.exist(db, id, callback);   
+   });
+};
+
+/**
+ * @function fileIsListed
+ *
+ * Checks if a file with the parameter name exists.
+ *
+ * @param name {String} name of the file
+ * @param callback {Function} callback function
+*/
+exports.fileIsListed = function (name, callback) {
+   var found = false;
+
+   accessDatabase(function (err, db) {
+      if(err) {
+         if(db)
+            db.close();
+
+         errorMessage("database access", err);
+         return callback(err, false);
+      }
+
+      GridStore.list(db, function (err, items) {
+         if (err) {
+            errorMessage("gridstore list", err);
+            return callback(err, false);
+         }
+
+         items.forEach(function (filename) {
+            found = found | (name === filename);
+         });
+
+         return callback(err, found);
+      });
    });
 };
 
