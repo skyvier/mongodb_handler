@@ -6,11 +6,16 @@
 
 /* MongoDB Handler private properties */
 
-var MongoClient = require('mongodb').MongoClient;
-var Server = require('mongodb').Server;
-var ObjectID = require('mongodb').ObjectID;
-var Validator = require('jsonschema').Validator;
+var MongoClient = require('mongodb').MongoClient,
+	 Server = require('mongodb').Server,
+	 ObjectID = require('mongodb').ObjectID,
+    Binary = require('mongodb').Binary,
+    GridStore = require('mongodb').GridStore,
+    Grid = require('mongodb').Grid,
+    Code = require('mongodb').Code,
+    BSON = require('mongodb').pure().BSON;
 
+var Validator = require('jsonschema').Validator;
 var Async = require('async');
 
 /* A JSON schema for the database configuration file */
@@ -336,7 +341,6 @@ exports.init = function () {
    return true;
 };
 
-
 /**
  * @function queryGlobal
  *
@@ -360,6 +364,7 @@ exports.queryGlobal = function (objects, count, callback) {
 */
 exports.insert = dbOperation.bind(null, insertOperation, { w:1 });
 
+
 /**
  * @function queryOne
  *
@@ -381,3 +386,191 @@ exports.queryOne = dbOperation.bind(null, queryOperation, { limit: 1 });
 */
 exports.query = dbOperation.bind(null, queryOperation);
 
+/**
+ * @function insertFile
+ *
+ * Database large file insert operation.
+ *
+ * @param path {String} file path 
+ * @param idSeed {String|Number} seed for the database id
+ * @param callback {Function} callback function
+*/
+exports.insertFile = function(path, idSeed, callback) {
+	var id, gridStore, fileSize;
+
+	fs.open(path, 'r', function (err, data) {
+		if (err) {
+         errorMessage("fs error", err);
+         return callback(err);
+		}
+
+      accessDatabase(function (err, db) {
+         if(err) {
+            if(db)
+               db.close();
+
+            errorMessage("database access", err);
+            return callback(err);
+         }
+
+         /* fetch the resource stats for testing */
+         fs.stat(path, function (err, stats) {
+            if (err) {
+               errorMessage("fs stat", err);
+               return callback(err);
+            }
+
+            if (typeof idSeed === 'string') {
+               id = idSeed;
+            } else {
+               id = ObjectID(idSeed);
+            }
+
+            gridStore = new GridStore(db, id, 'w');
+            fileSize = stats.size;
+
+            gridStore.open(function(err, gridStore) {
+               if (err) {
+                  errorMessage("gridstore open", err);
+                  return callback(err);
+               }
+
+               gridStore.writeFile(data, function (err, doc) {
+						if (err) {
+                     errorMessage("gridstore write", err);
+                     return callback(err);
+						}
+
+                  /* check if the sizes match */
+						GridStore.read(db, id, function(err, readData) {
+                     if (err) {
+                        errorMessage("gridstore read", err);
+                        return callback(err);
+                     }
+
+							if (fileSize !== readData.length) {
+								errorMessage("size mismatch");
+								return callback("size mismatch");
+							}
+							
+                     console.log("Inserted " + path + " to database (" + id.toHextString() + ")");
+							callback(null, doc);
+						});   
+               });
+            });   
+			});
+		});
+	});
+};
+
+/**
+ * @function readFile
+ *
+ * Read a large file from the database.
+ *
+ * @param idSeed {String|Number} seed for the database id
+ * @param callback {Function} callback function
+*/
+exports.readFile = function (idSeed, callback) {
+	var id, gridStore;
+
+   if (typeof idSeed === 'string') {
+      id = idSeed;
+   } else {
+      id = ObjectID(idSeed);
+   }
+
+   accessDatabase(function (err, db) {
+      if(err) {
+         if(db)
+            db.close();
+
+         errorMessage("database access", err);
+         return callback(err);
+      }
+
+      gridStore = new GridStore(db, id, 'r');
+      gridStore.open(function(err, gridStore) {
+         if (err) {
+            errorMessage("gridstore open", err);
+            return callback(err);
+         }
+
+         // go to the beginning and read from there
+         gridStore.seek(0, function () {
+            gridStore.read(function(err, data) {
+               if (err) {
+                  errorMessage("gridstore read", err);
+                  return callback(err);
+               }
+
+               console.log("Read from database (" + id.toHextString() + ")");
+               callback(null, data);
+            });   
+         });
+      });
+   });
+};
+
+
+/**
+ * @function fileExists
+ *
+ * Checks if a file exists in the database.
+ *
+ * @param idSeed {String|Number} seed for the database id
+ * @param callback {Function} callback function
+*/
+exports.fileExists = function (idSeed, callback) {
+   var id;
+
+   if (typeof idSeed === 'string') {
+      id = idSeed;
+   } else {
+      id = ObjectID(idSeed);
+   }
+
+   accessDatabase(function (err, db) {
+      if(err) {
+         if(db)
+            db.close();
+
+         errorMessage("database access", err);
+         return callback(err);
+      }
+
+      GridStore.exists(db, id, callback);   
+   });
+};
+
+/**
+ * @function rmFile
+ *
+ * Removes a file from the database.
+ *
+ * @param idSeed {String|Number} seed for the database id
+ * @param callback {Function} error callback function
+ */
+exports.rmFile = function (idSeed, callback) {
+   var id;
+
+   if (typeof idSeed === 'string') {
+      id = idSeed;
+   } else {
+      id = ObjectID(idSeed);
+   }
+
+   accessDatabase(function (err, db) {
+      if(err) {
+         if(db)
+            db.close();
+
+         errorMessage("database access", err);
+         return callback(err);
+      }
+
+      GridStore.unlink(db, id, function (err, gridStore) {
+         callback(err);
+      });
+   });
+};
