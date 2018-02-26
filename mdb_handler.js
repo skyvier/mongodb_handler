@@ -25,7 +25,8 @@ var configSchema = {
    "properties": {
       "server_url": { "type": "string" },
       "server_port": { "type": "string" },
-      "db_name": { "type": "string" }
+      "db_name": { "type": "string" },
+      "collections": { "type": "object" }
    },
    "required": ["server_url", "db_name"]
 };
@@ -45,6 +46,8 @@ var srvParam; // server parameters object
 var dataBase;
 var v = new Validator(); // JSON schema validator
 
+var DEFAULT_CONFIG_PATH = 'config.json';
+
 function checkValidity(param, schema) {
    var i;
    var report = v.validate(param, schema); 
@@ -59,11 +62,13 @@ function checkValidity(param, schema) {
    return false;
 }
 
-function openConfig() {
-   var data;
+function openConfig(file) {
+   var data, path;
+
+   path = file || DEFAULT_CONFIG_PATH;
 
    try {
-      data = Fs.readFileSync('config.json', 'utf8');
+      data = Fs.readFileSync(path, 'utf8');
    } catch(err) {
       console.log(err);
       return false;
@@ -100,13 +105,16 @@ function testServer() {
 }
 
 function errorMessage(entity, error) {
-   console.log("there was an error with " + entity + ": " + error);
+   var string = "there was an error with " + entity + ": " + error;
+   if (winston) {
+      winston.error(string);
+   } else {
+      console.log();
+   }
 }
 
 function detectRegex(object) {
    var i, regex, obj, prop;
-
-   console.log("\nDetecting regular expressions...");
 
    var objs = Object.keys(object).filter(function (value) {
       return typeof object[value] === 'object';
@@ -193,6 +201,24 @@ function getCollectionName(id, output) {
    });
 }
 
+function updateOne(filter, update, options, callback) {
+   if(!checkValidity(update, dbObjectSchema))
+      callback("validity error");
+
+   accessCollection(update.collection, function (err, collection, db) {
+      if(err) {
+         if(db)
+            db.close();
+
+         errorMessage("database collection", err);
+         return callback(err);
+      }
+
+      detectRegex(update.values);
+      collection.updateOne(filter, update.values, options, callback);
+   });
+}
+
 function dbOperation(operation, options, object, callback) {
    if(!checkValidity(object, dbObjectSchema))
       callback("validity error");
@@ -208,12 +234,6 @@ function dbOperation(operation, options, object, callback) {
 
       detectRegex(object.values);
 
-      var opName = operation.name;
-      console.log("\n### " + opName + " ###");
-      console.log("doing an " + opName + ": db." + object.collection +
-                  "." + opName + "(" + JSON.stringify(object.values, null, 4) + ")");
-      console.log(options);
-      
       operation(object, col, options, function (err, doc) {
          if(err) {
             db.close();
@@ -294,6 +314,116 @@ function globalQueryOperation(objects, count, options, output) {
    });
 }
 
+function parseJSONdots(json) {
+   var obj, keys, i;
+
+   if (typeof json === 'string') 
+      obj = json;
+   else 
+      obj = JSON.stringify(json);
+
+   try {
+      obj = JSON.parse(obj);
+      keys = Object.keys(obj);
+   } catch (err) {
+      errorMessage("parseJSONdots", err);
+      return obj;
+   }
+
+   var build = function (base, structureLeft, value) {
+      var current = structureLeft[0];
+
+      if (structureLeft.length > 1) {
+         base[current] = {};
+         structureLeft.shift();
+         build(base[current], structureLeft, value);
+      } else {
+         base[structureLeft[0]] = value;
+      }
+   };
+
+   for (i = 0; i < keys.length; i++) {
+      var splitted = keys[i].split('.');
+      if (splitted.length > 1) {
+         build(obj, splitted, obj[keys[i]]); 
+         delete obj[keys[i]]; 
+      } else if (typeof obj[keys[i]] === 'object') {
+         obj[keys[i]] = parseJSONdots(obj[keys[i]]);
+      }
+   }
+
+   return obj;
+}
+
+function insertFileFromData(name, meta, data, type, callback, safe) {
+   var fileSize = data ? data.length : 0;
+
+   if (!meta && !data) {
+      return callback('nothing to insert in insertFileFromData');
+   } else if (!name) {
+      return callback('no name provided in insertFileFromData');
+   }
+
+   meta = parseJSONdots(meta);
+
+   accessDatabase(function (err, db) {
+      if(err) {
+         if(db)
+            db.close();
+
+         errorMessage("database access", err);
+         return callback(err);
+      }
+
+      gridStore = new GridStore(db, new ObjectID(), name, 'w', { content_type: type, metadata: meta });
+
+      gridStore.open(function(err, gridStore) {
+         if (err) {
+            errorMessage("gridstore open", err);
+            return callback(err);
+         }
+
+         if (!data) {
+            gridStore.close(callback);
+            return;
+         }
+
+         gridStore.write(data, function (err, doc) {
+            if (err) {
+               errorMessage("gridstore write", err);
+               return callback(err);
+            }
+
+            gridStore.close(function (err, result) {
+               if (err) {
+                  errorMessage("gridstore close", err);
+                  return callback(err);
+               }
+
+               /* check if the sizes match */
+               if (typeof safe === 'boolean' && safe) {
+                  GridStore.read(db, result._id, function(err, readData) {
+                     if (err) {
+                        errorMessage("gridstore read", err);
+                        return callback(err);
+                     }
+
+                     if (fileSize !== readData.length) {
+                        errorMessage("size mismatch");
+                        return callback("size mismatch");
+                     }
+
+                     return callback(null, doc);
+                  });  
+               } else {
+                  return callback(null, doc);
+               }
+            });
+         });
+      });
+   });
+}
+
 /* MongoDB handler exports */
 
 /**
@@ -328,10 +458,11 @@ exports.checkConfig = openConfig;
  * Initialises the database: reads configuration, tests it,
  * and uses the parameters to connect to the database.
  *
+ * @param configFile {String} configurations file path
  * @returns {Boolean} false if anything goes wrong.
 */
-exports.init = function () {
-   if(!openConfig()) {
+exports.init = function (configFile) {
+   if(!openConfig(configFile)) {
       srvParam = null;
       console.log("srvParam is corrupted");
       return false;
@@ -349,13 +480,11 @@ exports.init = function () {
    accessDatabase(function (err, db) {
       if(!err) {
          dataBase = db;
-         console.log("database connection has been established");
       } else {
          return false;
       }
    });
 
-   console.log("the mongodb server " + mongoUrl + " is operational");
    return true;
 };
 
@@ -366,10 +495,24 @@ exports.init = function () {
  *
  * @param objects {Object[]} the database objects to be used
  * @param count {Number} the amount of docs returned
- * @param output {Function} callback function (err, doc)
+ * @param callback {Function} callback function (err, doc)
 */
 exports.queryGlobal = function (objects, count, callback) {
    globalQueryOperation(objects, count, {}, callback);
+};
+
+
+/**
+ * @function insertOrUpdate
+ *
+ * Database operation inserts file or updates it if it exists.
+ *
+ * @param query {Object} database query object
+ * @param update {Object} the database object to be inserted
+ * @param callback {Function} callback function (err, doc)
+*/
+exports.insertOrUpdate = function (query, update, callback) {
+   updateOne(query, update, { upsert: true }, callback); 
 };
 
 /**
@@ -405,7 +548,7 @@ exports.queryOne = dbOperation.bind(null, queryOperation, { limit: 1 });
 exports.query = dbOperation.bind(null, queryOperation);
 
 /**
- * @function insertFileWithMeta
+ * @function insertFromhMeta
  *
  * Database large file insert operation with
  * metadata and content-type.
@@ -416,7 +559,7 @@ exports.query = dbOperation.bind(null, queryOperation);
  * @param type {String} the type of the file (see GridFS content types)
  * @param callback {Function} callback function
 */
-exports.insertFileWithMeta = function(path, name, meta, type, callback) {
+exports.insertFromPath = function(path, name, meta, type, callback) {
 	var gridStore, fileSize;
 
 	Fs.open(path, 'r', function (err, data) {
@@ -425,61 +568,12 @@ exports.insertFileWithMeta = function(path, name, meta, type, callback) {
          return callback(err);
 		}
 
-      accessDatabase(function (err, db) {
-         if(err) {
-            if(db)
-               db.close();
-
-            errorMessage("database access", err);
-            return callback(err);
-         }
-
-         /* fetch the resource stats for testing */
-         Fs.stat(path, function (err, stats) {
-            if (err) {
-               errorMessage("fs stat", err);
-               return callback(err);
-            }
-
-            gridStore = new GridStore(db, name, 'w', { content_type: type, metadata: meta });
-            fileSize = stats.size;
-
-            gridStore.open(function(err, gridStore) {
-               if (err) {
-                  errorMessage("gridstore open", err);
-                  return callback(err);
-               }
-
-               gridStore.writeFile(data, function (err, doc) {
-						if (err) {
-                     errorMessage("gridstore write", err);
-                     return callback(err);
-						}
-
-                  /* check if the sizes match */
-						GridStore.read(db, name, function(err, readData) {
-                     if (err) {
-                        errorMessage("gridstore read", err);
-                        return callback(err);
-                     }
-
-							if (fileSize !== readData.length) {
-								errorMessage("size mismatch");
-								return callback("size mismatch");
-							}
-							
-                     console.log("Inserted " + path + " to database (" + name + ")");
-							callback(null, doc);
-						});   
-               });
-            });   
-			});
-		});
+      insertFileFromData(name, meta, data, type, callback);
 	});
 };
 
 /**
- * @function insertFile
+ * @function insertFileFromPath
  *
  * Database large file insert operation with no metadata.
  *
@@ -487,9 +581,22 @@ exports.insertFileWithMeta = function(path, name, meta, type, callback) {
  * @param name {String} name of the file in the database
  * @param callback {Function} callback function
 */
-exports.insertFile = function (path, name, callback) {
+exports.insertFileFromPath = function (path, name, callback) {
    module.exports.insertFileWithMeta(path, name, null, null, callback);   
 };
+
+/**
+ * @function insertFileFromData
+ *
+ * Database large file insert operation with metadata and raw data.
+ *
+ * @param name {String} identifier in database (all sizes) 
+ * @param meta {Object} metadata
+ * @param data {Buffer} data buffer
+ * @param type {String} type string
+ * @param callback {Function} callback function
+*/
+exports.insertFileFromData = insertFileFromData;
 
 /**
  * @function readFile
@@ -524,9 +631,6 @@ exports.readFile = function (idSeed, callback) {
             return callback(err);
          }
 
-         console.log("META?");
-         console.log(gridStore.metadata);
-
          // go to the beginning and read from there
          gridStore.seek(0, function () {
             gridStore.read(function(err, data) {
@@ -535,7 +639,6 @@ exports.readFile = function (idSeed, callback) {
                   return callback(err);
                }
 
-               console.log("Read from database (" + id + ")");
                callback(null, data);
             });   
          });
