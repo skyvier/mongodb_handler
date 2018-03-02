@@ -7,16 +7,21 @@
 /* MongoDB Handler private properties */
 
 var MongoClient = require('mongodb').MongoClient,
+    Mongo = require('mongodb');
 	 Server = require('mongodb').Server,
 	 ObjectID = require('mongodb').ObjectID,
     Binary = require('mongodb').Binary,
     GridStore = require('mongodb').GridStore,
     Grid = require('mongodb').Grid,
-    Code = require('mongodb').Code;
+    Code = require('mongodb').Code,
+    GridStream = require('gridfs-stream');
 
 var Validator = require('jsonschema').Validator;
 var Async = require('async');
 var Fs = require('fs');
+var Stream = require('stream');
+var Util = require('util');
+var Circular = require('circular');
 
 /* A JSON schema for the database configuration file */
 var configSchema = {
@@ -424,6 +429,31 @@ function insertFileFromData(name, meta, data, type, callback, safe) {
    });
 }
 
+function getFileInsertStream(name, meta, type, callback) {
+   var writeStream;
+
+   if (!meta) {
+      return callback('nothing to insert in insertFileFromData');
+   } else if (!name) {
+      return callback('no name provided in insertFileFromData');
+   }
+
+   meta = parseJSONdots(meta);
+
+   accessDatabase(function (err, db) {
+      if(err) {
+         if(db)
+            db.close();
+
+         return callback(err);
+      }
+
+      var gfs = GridStream(db, Mongo);
+      var stream = gfs.createWriteStream({ filename: name, content_type: type, metadata: meta });
+      return callback(null, stream);
+   });
+}
+
 /* MongoDB handler exports */
 
 /**
@@ -597,6 +627,7 @@ exports.insertFileFromPath = function (path, name, callback) {
  * @param callback {Function} callback function
 */
 exports.insertFileFromData = insertFileFromData;
+exports.getFileInsertStream = getFileInsertStream;
 
 /**
  * @function readFile
@@ -657,7 +688,13 @@ exports.readFile = function (idSeed, callback) {
  * @todo doesn't work
 */
 exports.fileExists = function (idSeed, callback) {
-   var id = ObjectID(idSeed);
+   var id;
+
+   if (typeof idSeed === 'string') {
+      id = idSeed;
+   } else {
+      id = ObjectID(idSeed);
+   }
 
    accessDatabase(function (err, db) {
       if(err) {
@@ -669,41 +706,6 @@ exports.fileExists = function (idSeed, callback) {
       }
 
       GridStore.exist(db, id, callback);   
-   });
-};
-
-/**
- * @function fileIsListed
- *
- * Checks if a file with the parameter name exists.
- *
- * @param name {String} name of the file
- * @param callback {Function} callback function
-*/
-exports.fileIsListed = function (name, callback) {
-   var found = false;
-
-   accessDatabase(function (err, db) {
-      if(err) {
-         if(db)
-            db.close();
-
-         errorMessage("database access", err);
-         return callback(err, false);
-      }
-
-      GridStore.list(db, function (err, items) {
-         if (err) {
-            errorMessage("gridstore list", err);
-            return callback(err, false);
-         }
-
-         items.forEach(function (filename) {
-            found = found | (name === filename);
-         });
-
-         return callback(err, found);
-      });
    });
 };
 
