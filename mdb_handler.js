@@ -449,7 +449,7 @@ function getFileInsertStream(name, meta, type, callback) {
       }
 
       var gfs = GridStream(db, Mongo);
-      var stream = gfs.createWriteStream({ filename: name, content_type: type, metadata: meta });
+      var stream = gfs.createWriteStream({ filename: name, content_type: type, metadata: meta, mode: 'w+' });
       return callback(null, stream);
    });
 }
@@ -637,14 +637,43 @@ exports.getFileInsertStream = getFileInsertStream;
  * @param idSeed {String|Number} seed for the database id
  * @param callback {Function} callback function
 */
-exports.readFile = function (idSeed, callback) {
-	var id, gridStore;
+exports.readFile = function (name, callback) {
+   var content = new Buffer(0);
+   var contentLength = 0;
 
-   if (typeof idSeed === 'string') {
-      id = idSeed;
-   } else {
-      id = ObjectID(idSeed);
-   }
+   module.exports.getFileReadStream(name, function (err, stream) {
+      stream.on('error', function (err) {
+         return callback(err);
+      });
+
+      stream.on('data', function (chunk) {
+         contentLength += chunk.length;
+         content = Buffer.concat([content, chunk], contentLength);
+      });
+
+      stream.on('end', function (chunk) {
+         if (chunk) {
+            contentLength += chunk.length;
+            content = Buffer.concat([content, chunk], contentLength);
+         }
+      });
+
+      stream.on('close', function () {
+         return callback(null, content);
+      });
+   });
+};
+
+/**
+ * @function getFileReadStream
+ *
+ * Read a large file from the database as a stream.
+ *
+ * @param idSeed {String|Number} seed for the database id
+ * @param callback {Function} callback function
+*/
+exports.getFileReadStream = function (name, callback) {
+	var gridStore;
 
    accessDatabase(function (err, db) {
       if(err) {
@@ -655,25 +684,9 @@ exports.readFile = function (idSeed, callback) {
          return callback(err);
       }
 
-      gridStore = new GridStore(db, id, 'r');
-      gridStore.open(function(err, gridStore) {
-         if (err) {
-            errorMessage("gridstore open", err);
-            return callback(err);
-         }
-
-         // go to the beginning and read from there
-         gridStore.seek(0, function () {
-            gridStore.read(function(err, data) {
-               if (err) {
-                  errorMessage("gridstore read", err);
-                  return callback(err);
-               }
-
-               callback(null, data);
-            });   
-         });
-      });
+      var gfs = GridStream(db, Mongo);
+      var stream = gfs.createReadStream({ filename: name });
+      return callback(null, stream);
    });
 };
 
